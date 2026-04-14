@@ -7,8 +7,8 @@ Extracted from Jan's inference architecture:
   - Jan's OAIEngine ties them together with event-based message routing.
 
 This module collapses that into a single Agent class that runs a
-think-act-observe loop with tool calling, using the OpenAI-compatible
-chat completion API that Gemma 4 supports (via Ollama or similar).
+think-act-observe loop with tool calling.  Works with both offline
+(local GGUF) and online (Ollama/HTTP) inference backends.
 """
 
 from __future__ import annotations
@@ -43,9 +43,8 @@ class Agent:
 
     def __init__(
         self,
+        client: InferenceClient,
         model: str = "gemma4",
-        base_url: str = "http://localhost:11434/v1",
-        api_key: str = "",
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         temperature: float = 0.7,
         verbose: bool = False,
@@ -54,7 +53,7 @@ class Agent:
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.verbose = verbose
-        self.client = InferenceClient(base_url=base_url, api_key=api_key)
+        self.client = client
         self.messages: list[Message] = []
 
     # ------------------------------------------------------------------

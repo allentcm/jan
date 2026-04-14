@@ -1,22 +1,30 @@
 """
 Core inference module — extracted from Jan's AI engine patterns.
 
-Jan uses an OpenAI-compatible chat completion interface (see core/src/browser/extensions/engines/AIEngine.ts).
-This module distills that into a minimal Python client that speaks the same protocol,
-targeting a local Gemma 4 model served via Ollama or any OpenAI-compatible endpoint.
+Jan uses an OpenAI-compatible chat completion interface
+(see core/src/browser/extensions/engines/AIEngine.ts) and loads local
+GGUF models via llama.cpp (see extensions/llamacpp-extension/).
+
+This module provides two backends:
+  1. LocalInferenceClient  — loads a GGUF file directly via llama-cpp-python
+                             (fully offline, no server needed).
+  2. RemoteInferenceClient — talks to an OpenAI-compatible HTTP endpoint
+                             (Ollama, vLLM, etc.).
 """
 
 from __future__ import annotations
 
 import json
+import uuid
+import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
-from typing import Any, Generator
+from typing import Any, Generator, Protocol
 
 
 # ---------------------------------------------------------------------------
-# Types — mirrors Jan's chatCompletionRequest / chatCompletion / chatCompletionChunk
+# Types — mirrors Jan's chatCompletionRequest / chatCompletion
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -42,8 +50,7 @@ class Message:
 class ChatCompletionRequest:
     """
     Minimal chat completion request.
-    Mirrors Jan's chatCompletionRequest (AIEngine.ts) — only the fields
-    that matter for a simple agent loop.
+    Mirrors Jan's chatCompletionRequest (AIEngine.ts).
     """
     model: str
     messages: list[Message]
@@ -80,14 +87,104 @@ class ChatCompletion:
 
 
 # ---------------------------------------------------------------------------
-# Client — the actual HTTP call, analogous to Jan's OAIEngine.chat()
+# Protocol — both clients implement this
 # ---------------------------------------------------------------------------
 
-class InferenceClient:
+class InferenceClient(Protocol):
+    def chat(self, request: ChatCompletionRequest) -> ChatCompletion: ...
+
+
+# ---------------------------------------------------------------------------
+# 1. Local offline inference via llama-cpp-python
+#    Mirrors Jan's llamacpp-extension: loads GGUF, runs chat completions
+#    in-process with the same settings (ctx_size, threads, flash_attn, etc.)
+# ---------------------------------------------------------------------------
+
+class LocalInferenceClient:
     """
-    Lightweight OpenAI-compatible inference client.
-    Works with Ollama (default http://localhost:11434/v1) or any
-    OpenAI-compatible server.
+    Offline inference — loads a GGUF model directly using llama-cpp-python.
+    No server process, no network. This is the Python equivalent of what
+    Jan's llamacpp-extension does via its Tauri plugin.
+
+    Install:  pip install llama-cpp-python
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        n_ctx: int = 4096,
+        n_gpu_layers: int = -1,
+        flash_attn: bool = True,
+        n_threads: int | None = None,
+        verbose: bool = False,
+    ):
+        try:
+            from llama_cpp import Llama
+        except ImportError:
+            raise ImportError(
+                "Offline inference requires llama-cpp-python.\n"
+                "Install it with:  pip install llama-cpp-python\n"
+                "For GPU support:   CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python"
+            )
+
+        print(f"Loading model: {model_path}")
+        print(f"  n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers}, flash_attn={flash_attn}")
+
+        kwargs: dict[str, Any] = {
+            "model_path": model_path,
+            "n_ctx": n_ctx,
+            "n_gpu_layers": n_gpu_layers,
+            "flash_attn": flash_attn,
+            "verbose": verbose,
+        }
+        if n_threads is not None:
+            kwargs["n_threads"] = n_threads
+
+        self._llm = Llama(
+            **kwargs,
+            chat_format="chatml-function-calling",
+        )
+        self._model_path = model_path
+        print("Model loaded.\n")
+
+    def chat(self, request: ChatCompletionRequest) -> ChatCompletion:
+        """Run chat completion locally — no network needed."""
+        messages = [m.to_dict() for m in request.messages]
+
+        kwargs: dict[str, Any] = {
+            "messages": messages,
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+        }
+        if request.tools:
+            kwargs["tools"] = request.tools
+            kwargs["tool_choice"] = request.tool_choice or "auto"
+
+        result = self._llm.create_chat_completion(**kwargs)
+
+        choice = result["choices"][0]
+        message = choice["message"]
+
+        return ChatCompletion(
+            id=result.get("id", f"local-{uuid.uuid4().hex[:8]}"),
+            model=result.get("model", self._model_path),
+            content=message.get("content"),
+            tool_calls=message.get("tool_calls"),
+            finish_reason=choice.get("finish_reason"),
+            usage=result.get("usage"),
+            raw=result,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2. Remote inference via HTTP (Ollama / vLLM / any OpenAI-compatible server)
+#    Mirrors Jan's OAIEngine HTTP path.
+# ---------------------------------------------------------------------------
+
+class RemoteInferenceClient:
+    """
+    Talks to an OpenAI-compatible HTTP endpoint.
+    Works with Ollama (localhost:11434/v1), vLLM, LM Studio, etc.
     """
 
     def __init__(
@@ -100,10 +197,7 @@ class InferenceClient:
         self.api_key = api_key
         self.timeout = timeout
 
-    # -- non-streaming chat -------------------------------------------------
-
     def chat(self, request: ChatCompletionRequest) -> ChatCompletion:
-        """Send a chat completion request and return the parsed response."""
         request.stream = False
         url = f"{self.base_url}/chat/completions"
         body = json.dumps(request.to_dict()).encode()
@@ -139,8 +233,6 @@ class InferenceClient:
             usage=data.get("usage"),
             raw=data,
         )
-
-    # -- streaming chat -----------------------------------------------------
 
     def chat_stream(
         self, request: ChatCompletionRequest
