@@ -1,9 +1,8 @@
-# Required for offline (local GGUF) inference:
-llama-cpp-python>=0.3.0
-
-# For GPU acceleration, install with:
-#   CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python    # NVIDIA
-#   CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python   # Apple Silicon
-#   CMAKE_ARGS="-DGGML_VULKAN=on" pip install llama-cpp-python  # AMD/Intel
+# Installed automatically by install.py — you don't need to run this manually.
 #
-# Remote mode (Ollama) needs no dependencies — uses stdlib only.
+# For manual install:
+#   pip install llama-cpp-python          # CPU
+#   CMAKE_ARGS="-DGGML_CUDA=on"  pip install llama-cpp-python   # NVIDIA
+#   CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python   # Apple Silicon
+
+llama-cpp-python>=0.3.0
