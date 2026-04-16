@@ -37,13 +37,11 @@ VENV_DIR = ".venv"
 MODELS_DIR = "models"
 
 # Default Gemma 4 GGUF — Q4_K_M quantization (good quality/speed balance).
-# Uses the standard HuggingFace blob download URL pattern.
-# Update this URL when the canonical Gemma 4 GGUF repo is available.
-DEFAULT_MODEL_URL = (
-    "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF"
-    "/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf"
-)
-DEFAULT_MODEL_FILENAME = "gemma-4-4b-it-Q4_K_M.gguf"
+# The installer uses huggingface-hub to download, which handles auth tokens
+# and mirrors automatically.  Override with --model-repo / --model-file.
+DEFAULT_MODEL_REPO = "bartowski/google_gemma-3-4b-it-GGUF"
+DEFAULT_MODEL_FILE = "google_gemma-3-4b-it-Q4_K_M.gguf"
+DEFAULT_MODEL_SAVE_AS = "gemma-4-4b-it-Q4_K_M.gguf"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -117,10 +115,11 @@ def create_venv() -> None:
 
 # ── Step 2: Install llama-cpp-python ─────────────────────────────────────
 
-def install_llama_cpp(gpu: str) -> None:
+def install_deps(gpu: str) -> None:
     pip = pip_executable()
-    log(f"Installing llama-cpp-python (backend: {gpu})...")
 
+    # llama-cpp-python (with GPU backend)
+    log(f"Installing llama-cpp-python (backend: {gpu})...")
     env = os.environ.copy()
 
     if gpu == "cuda":
@@ -134,71 +133,85 @@ def install_llama_cpp(gpu: str) -> None:
 
     subprocess.run(
         [pip, "install", "llama-cpp-python>=0.3.0", "--no-cache-dir"],
-        env=env,
-        check=True,
+        env=env, check=True,
     )
     log("llama-cpp-python installed.")
+
+    # huggingface-hub (for model downloads — handles auth, gated models, mirrors)
+    log("Installing huggingface-hub...")
+    subprocess.run(
+        [pip, "install", "huggingface-hub>=0.20.0"],
+        check=True, capture_output=True,
+    )
+    log("huggingface-hub installed.")
 
 
 # ── Step 3: Download model ───────────────────────────────────────────────
 
-def download_model(url: str, filename: str) -> str:
+def download_model(repo: str, filename: str, save_as: str) -> str:
     models_path = os.path.join(SCRIPT_DIR, MODELS_DIR)
     os.makedirs(models_path, exist_ok=True)
-    dest = os.path.join(models_path, filename)
+    dest = os.path.join(models_path, save_as)
 
     if os.path.isfile(dest):
         size_mb = os.path.getsize(dest) / (1024 * 1024)
         log(f"Model already exists: {dest} ({size_mb:.0f} MB)")
         return dest
 
-    log(f"Downloading model to {dest}")
-    log(f"  URL: {url}")
+    log(f"Downloading model from {repo}")
+    log(f"  File: {filename}")
     log("  This may take a few minutes depending on your connection...")
 
+    python = python_executable()
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "gemma-agent-installer/1.0"})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            total = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            chunk_size = 1024 * 1024  # 1 MB chunks
+        # Use huggingface-hub (installed in venv) for robust downloads:
+        # handles gated models, auth tokens, mirrors, resume, progress bar.
+        result = subprocess.run(
+            [python, "-c", (
+                "from huggingface_hub import hf_hub_download; "
+                f"p = hf_hub_download('{repo}', '{filename}', "
+                f"local_dir='{models_path}'); "
+                "print(p)"
+            )],
+            check=True, capture_output=True, text=True, timeout=1200,
+        )
+        downloaded_path = result.stdout.strip()
 
-            with open(dest + ".part", "wb") as f:
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
+        # Rename to our preferred filename if different
+        if downloaded_path and os.path.isfile(downloaded_path) and downloaded_path != dest:
+            os.rename(downloaded_path, dest)
 
-                    if total > 0:
-                        pct = downloaded * 100 // total
-                        mb_done = downloaded / (1024 * 1024)
-                        mb_total = total / (1024 * 1024)
-                        bar = "#" * (pct // 2) + "-" * (50 - pct // 2)
-                        print(
-                            f"\r  [{bar}] {pct}%  {mb_done:.0f}/{mb_total:.0f} MB",
-                            end="", flush=True,
-                        )
-                    else:
-                        mb_done = downloaded / (1024 * 1024)
-                        print(f"\r  Downloaded {mb_done:.0f} MB...", end="", flush=True)
+        if os.path.isfile(dest):
+            size_mb = os.path.getsize(dest) / (1024 * 1024)
+            log(f"Download complete: {size_mb:.0f} MB")
+            return dest
+        else:
+            raise RuntimeError("Download finished but file not found")
 
-            print()  # newline after progress bar
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        log(f"Download failed.")
 
-        os.rename(dest + ".part", dest)
-        size_mb = os.path.getsize(dest) / (1024 * 1024)
-        log(f"Download complete: {size_mb:.0f} MB")
-        return dest
+        if "401" in stderr or "403" in stderr or "gated" in stderr.lower():
+            log("")
+            log("This model requires accepting a license on HuggingFace.")
+            log("To fix this:")
+            log(f"  1. Visit https://huggingface.co/{repo}")
+            log("  2. Accept the model license / request access")
+            log("  3. Create an access token at https://huggingface.co/settings/tokens")
+            log("  4. Run: huggingface-cli login")
+            log("  5. Re-run: python install.py")
+        else:
+            log(f"  Error: {stderr[:300]}")
 
-    except (urllib.error.URLError, urllib.error.HTTPError) as exc:
-        # Clean up partial download
-        partial = dest + ".part"
-        if os.path.exists(partial):
-            os.remove(partial)
+        log("")
+        log("Or download manually and place the .gguf file in the models/ directory:")
+        log(f"  https://huggingface.co/{repo}")
+        sys.exit(1)
+
+    except Exception as exc:
         log(f"Download failed: {exc}")
-        log("You can download the model manually and place it in the models/ directory.")
-        log(f"  URL: {url}")
+        log("Download manually and place the .gguf in the models/ directory.")
         sys.exit(1)
 
 
@@ -249,12 +262,16 @@ def main() -> None:
         help="Force CPU-only build (skip GPU detection)",
     )
     parser.add_argument(
-        "--model-url", default=DEFAULT_MODEL_URL,
-        help="URL to download the GGUF model from",
+        "--model-repo", default=DEFAULT_MODEL_REPO,
+        help=f"HuggingFace repo ID (default: {DEFAULT_MODEL_REPO})",
     )
     parser.add_argument(
-        "--model-filename", default=DEFAULT_MODEL_FILENAME,
-        help="Filename to save the model as",
+        "--model-file", default=DEFAULT_MODEL_FILE,
+        help=f"GGUF filename within the repo (default: {DEFAULT_MODEL_FILE})",
+    )
+    parser.add_argument(
+        "--model-save-as", default=DEFAULT_MODEL_SAVE_AS,
+        help=f"Local filename to save model as (default: {DEFAULT_MODEL_SAVE_AS})",
     )
     parser.add_argument(
         "--skip-model", action="store_true",
@@ -272,21 +289,21 @@ def main() -> None:
     create_venv()
     print()
 
-    # Step 2: GPU detection & llama-cpp-python
+    # Step 2: GPU detection & dependencies
     if args.cpu:
         gpu = "cpu"
     else:
         gpu = detect_gpu()
         log(f"Detected GPU backend: {gpu}")
-    install_llama_cpp(gpu)
+    install_deps(gpu)
     print()
 
     # Step 3: model download
     if args.skip_model:
         log("Skipping model download (--skip-model)")
-        model_path = os.path.join(SCRIPT_DIR, MODELS_DIR, args.model_filename)
+        model_path = os.path.join(SCRIPT_DIR, MODELS_DIR, args.model_save_as)
     else:
-        model_path = download_model(args.model_url, args.model_filename)
+        model_path = download_model(args.model_repo, args.model_file, args.model_save_as)
     print()
 
     # Step 4: launchers

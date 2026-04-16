@@ -1,0 +1,6 @@
+.venv/
+models/
+run.sh
+run.bat
+__pycache__/
+*.pyc
