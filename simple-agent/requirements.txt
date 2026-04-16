@@ -1,8 +1,12 @@
 # Installed automatically by install.py — you don't need to run this manually.
 #
-# For manual install:
-#   pip install llama-cpp-python          # CPU
-#   CMAKE_ARGS="-DGGML_CUDA=on"  pip install llama-cpp-python   # NVIDIA
-#   CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python   # Apple Silicon
-
+# Core (offline inference):
 llama-cpp-python>=0.3.0
+huggingface-hub>=0.20.0
+
+# Browser agent (Pydantic AI + agent-browser):
+pydantic-ai[openai]>=0.1.0
+pydantic>=2.0
+
+# agent-browser CLI (installed separately via npm):
+#   npm install -g agent-browser && agent-browser install

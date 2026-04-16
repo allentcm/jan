@@ -145,6 +145,39 @@ def install_deps(gpu: str) -> None:
     )
     log("huggingface-hub installed.")
 
+    # pydantic-ai (agent framework for the browser agent)
+    log("Installing pydantic-ai[openai]...")
+    subprocess.run(
+        [pip, "install", "pydantic-ai[openai]>=0.1.0"],
+        check=True, capture_output=True,
+    )
+    log("pydantic-ai installed.")
+
+
+# ── Step 2b: Install agent-browser ────────────────────────────────────────
+
+def install_agent_browser() -> None:
+    """Install agent-browser CLI and its browser dependency."""
+    if shutil.which("agent-browser"):
+        log("agent-browser already installed.")
+        return
+
+    if not shutil.which("npm"):
+        log("WARNING: npm not found. agent-browser requires Node.js.")
+        log("  Install Node.js from https://nodejs.org")
+        log("  Then run: npm install -g agent-browser && agent-browser install")
+        return
+
+    log("Installing agent-browser CLI via npm...")
+    try:
+        subprocess.run(["npm", "install", "-g", "agent-browser"], check=True)
+        log("Running agent-browser install (downloads Chrome)...")
+        subprocess.run(["agent-browser", "install"], check=True, timeout=300)
+        log("agent-browser installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        log(f"agent-browser install failed: {exc}")
+        log("  You can install manually: npm install -g agent-browser && agent-browser install")
+
 
 # ── Step 3: Download model ───────────────────────────────────────────────
 
@@ -298,6 +331,10 @@ def main() -> None:
     install_deps(gpu)
     print()
 
+    # Step 2b: agent-browser
+    install_agent_browser()
+    print()
+
     # Step 3: model download
     if args.skip_model:
         log("Skipping model download (--skip-model)")
@@ -315,24 +352,24 @@ def main() -> None:
     print("  Installation complete!")
     print("=" * 60)
     print()
-    print("  To run the agent:")
-    print()
+    print("  Standalone agent (offline, no browser):")
     if platform.system() == "Windows":
         print("    run.bat")
-        print("    run.bat --verbose")
     else:
         print("    ./run.sh")
-        print("    ./run.sh --verbose")
     print()
-    print("  Or manually:")
+    print("  Browser agent (web browsing + mind map):")
+    rel_model = os.path.relpath(model_path, SCRIPT_DIR)
     print(f"    source {VENV_DIR}/bin/activate")
-    print(f"    python gemma_agent.py --model-path {os.path.relpath(model_path, SCRIPT_DIR)}")
+    print(f"    python browser_agent.py --interactive")
+    print(f"    python browser_agent.py \"Find the pricing on example.com\"")
+    print(f"    python browser_agent.py --headed --verbose \"Search Google for pydantic ai\"")
     print()
     print("  Options:")
-    print("    --n-ctx 8192        Larger context window")
-    print("    --n-gpu-layers 0    CPU-only inference")
-    print("    --verbose           Show tool calls")
-    print("    --temperature 0.5   Lower temperature")
+    print("    --model gemma3:4b    Model name (Ollama)")
+    print("    --headed             Show browser window")
+    print("    --verbose            Show tool calls")
+    print("    --mindmap FILE       Mind map JSON path")
     print()
 
 
